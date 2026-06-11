@@ -1,6 +1,6 @@
 
 // =============================================================================
-// 🟣 1. 用户配置区域 (优先级: 环境变量 > D1 > KV > 硬编码)
+// 🟣 1. 用户配置区域 (优先级: 环境变量 > D1 > 硬编码)
 // =============================================================================
 
 // --- 基础账号与网络配置 ---
@@ -809,23 +809,19 @@ const ws = async req => {
 async function getSafeEnv(env, key, fallback) {
     if (env[key] && env[key].trim() !== "") return env[key];
     if (env.DB) { try { const { results } = await env.DB.prepare("SELECT value FROM config WHERE key = ?").bind(key).all(); if (results && results.length > 0 && results[0].value) return results[0].value; } catch(e) {} }
-    if (env.LH) { try { const kvVal = await env.LH.get(key); if (kvVal) return kvVal; } catch(e) {} }
     return fallback;
 }
-const KV_LOG_KEY = 'ACCESS_LOGS';
-const KV_LOG_LIMIT = 4 * 1024 * 1024;
-const KV_LOG_THROTTLE_PREFIX = 'LOG_THROTTLE_';
-const KV_LOG_ENTRY_PREFIX = 'ACCESS_LOG_CHUNK_';
-const KV_LOG_SHARDS = 8;
-const KV_KNOWN_LOG_SCAN_LIMIT = 2048;
-const KV_STATS_SHARDS = 8;
 const splitCSV = (value) => (value || '').split(',').map(s => s.trim()).filter(Boolean);
-const getByteLength = (value) => new TextEncoder().encode(value || '').length;
-const buildStatsKey = (dateStr) => `STATS_${dateStr}`;
-const buildStatsPrefix = (dateStr) => `STATS_${dateStr}_`;
-const buildLogThrottleKey = (ip, action) => `${KV_LOG_THROTTLE_PREFIX}${btoa(unescape(encodeURIComponent(`${ip || 'unknown'}|${action || ''}`))).replace(/[+/=]/g, '_')}`;
-const buildKvLogChunkKey = () => `${KV_LOG_ENTRY_PREFIX}${String(Date.now()).padStart(13, '0')}_${String(Math.floor(Math.random() * KV_LOG_SHARDS)).padStart(2, '0')}_${Math.random().toString(36).slice(2, 8)}`;
-const buildStatsShardKey = (dateStr, date = new Date()) => `${buildStatsPrefix(dateStr)}${String(date.getUTCHours()).padStart(2, '0')}_${String(Math.floor(Math.random() * KV_STATS_SHARDS)).padStart(2, '0')}`;
+const _throttleMap = new Map();
+let _tCnt = 0;
+function isThrottled(ip, action, ttlMs = 30000) {
+    const key = `${ip}|${action}`;
+    const now = Date.now();
+    if (_throttleMap.get(key) > now) return true;
+    _throttleMap.set(key, now + ttlMs);
+    if (++_tCnt >= 100) { _tCnt = 0; for (const [k, v] of _throttleMap) { if (v <= now) _throttleMap.delete(k); } }
+    return false;
+}
 const parseLogTimeMs = (value) => {
     const m = (value || '').match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})$/);
     if (!m) return 0;
@@ -843,122 +839,12 @@ const normalizeLogEntry = (log) => {
     normalized.sortTime = parseLogTimeMs(normalized.time);
     return normalized;
 };
-const parseKvLogLine = (line) => {
-    if (!line) return null;
-    const parts = line.split('|');
-    if (parts.length < 4) return null;
-    return normalizeLogEntry({
-        time: parts[0],
-        ip: parts[1],
-        region: parts[2],
-        action: parts.slice(3).join('|')
-    });
-};
-const sortLogEntries = (logs) => logs.slice().sort((a, b) => Number(b.sortTime || 0) - Number(a.sortTime || 0) || Number(b.id || 0) - Number(a.id || 0));
-const mergeLogEntries = (primaryLogs, fallbackLogs, limit = 50) => {
-    const merged = [];
-    const seen = new Set();
-    for (const raw of [...(primaryLogs || []), ...(fallbackLogs || [])]) {
-        const log = normalizeLogEntry(raw);
-        if (!log) continue;
-        const key = `${log.time}|${log.ip}|${log.region}|${log.action}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        merged.push(log);
-    }
-    return sortLogEntries(merged).slice(0, limit);
-};
-async function listKvKeys(env, prefix, maxKeys = 1000) {
-    if (!env.LH) return [];
-    let cursor;
-    const keys = [];
-    do {
-        const page = await env.LH.list(cursor ? { prefix, cursor, limit: 1000 } : { prefix, limit: 1000 });
-        keys.push(...(page.keys || []));
-        if (page.list_complete || !page.cursor || keys.length >= maxKeys) break;
-        cursor = page.cursor;
-    } while (true);
-    return keys.slice(0, maxKeys);
-}
-async function migrateLegacyKvLogs(env) {
-    if (!env.LH) return;
-    try {
-        const existing = await env.LH.list({ prefix: KV_LOG_ENTRY_PREFIX, limit: 1 });
-        if ((existing.keys || []).length > 0) return;
-        const legacy = await env.LH.get(KV_LOG_KEY) || "";
-        if (!legacy) return;
-        await env.LH.put(`${KV_LOG_ENTRY_PREFIX}legacy_${Date.now()}`, legacy, { metadata: { bytes: getByteLength(legacy) } });
-        await env.LH.delete(KV_LOG_KEY);
-    } catch(e) {}
-}
-async function cleanupKvLogs(env) {
-    if (!env.LH) return;
-    try {
-        const keys = await listKvKeys(env, KV_LOG_ENTRY_PREFIX, KV_KNOWN_LOG_SCAN_LIMIT);
-        if (keys.length === 0) return;
-        const ordered = keys.slice().sort((a, b) => a.name.localeCompare(b.name));
-        let totalBytes = ordered.reduce((sum, item) => sum + Number(item.metadata?.bytes || 0), 0);
-        if (totalBytes <= KV_LOG_LIMIT) return;
-        for (const item of ordered) {
-            await env.LH.delete(item.name);
-            totalBytes -= Number(item.metadata?.bytes || 0);
-            if (totalBytes <= KV_LOG_LIMIT) break;
-        }
-    } catch(e) {}
-}
-async function appendKvLog(env, entry) {
-    if (!env.LH || !entry) return;
-    try {
-        await migrateLegacyKvLogs(env);
-        const key = buildKvLogChunkKey();
-        const payload = getByteLength(entry) > KV_LOG_LIMIT ? entry.slice(-Math.floor(KV_LOG_LIMIT / 2)) : entry;
-        await env.LH.put(key, payload, { metadata: { bytes: getByteLength(payload) } });
-        await cleanupKvLogs(env);
-    } catch(e) {}
-}
-async function getKvLogObjects(env, limit = 50) {
-    if (!env.LH) return [];
-    try {
-        const chunkKeys = await listKvKeys(env, KV_LOG_ENTRY_PREFIX, KV_KNOWN_LOG_SCAN_LIMIT);
-        if (chunkKeys.length > 0) {
-            const ordered = chunkKeys.slice().sort((a, b) => a.name.localeCompare(b.name));
-            const items = [];
-            for (let i = ordered.length - 1; i >= 0 && items.length < limit * 4; i--) {
-                const raw = await env.LH.get(ordered[i].name) || "";
-                if (!raw) continue;
-                const lines = raw.split('\n').filter(Boolean);
-                for (let j = lines.length - 1; j >= 0 && items.length < limit * 4; j--) {
-                    const parsed = parseKvLogLine(lines[j]);
-                    if (parsed) items.push(parsed);
-                }
-            }
-            return sortLogEntries(items).slice(0, limit);
-        }
-        const raw = await env.LH.get(KV_LOG_KEY) || "";
-        if (!raw) return [];
-        return raw.split('\n').filter(Boolean).slice(-limit).map(parseKvLogLine).filter(Boolean);
-    } catch(e) { return []; }
-}
 async function getStoredDailyStats(env, dateStr) {
     if (env.DB) {
         try {
             const { results } = await env.DB.prepare("SELECT count FROM stats WHERE date = ?").bind(dateStr).all();
             const val = results[0]?.count;
             if (val !== undefined && val !== null) return val.toString();
-        } catch(e) {}
-    }
-    if (env.LH) {
-        try {
-            const kvVal = await env.LH.get(buildStatsKey(dateStr));
-            if (kvVal) return kvVal;
-            const shardKeys = await listKvKeys(env, buildStatsPrefix(dateStr), 256);
-            if (shardKeys.length > 0) {
-                let total = 0;
-                for (const item of shardKeys) {
-                    total += Number(await env.LH.get(item.name) || "0");
-                }
-                if (total > 0) return total.toString();
-            }
         } catch(e) {}
     }
     return "0";
@@ -968,7 +854,6 @@ async function checkWhitelist(env, ip) {
     const envWL = await getSafeEnv(env, 'WL_IP', ADMIN_IP);
     if (splitCSV(envWL).includes(ip) || splitCSV(ADMIN_IP).includes(ip)) return true;
     if (env.DB) { try { const { results } = await env.DB.prepare("SELECT 1 FROM whitelist WHERE ip = ?").bind(ip).all(); if (results && results.length > 0) return true; } catch(e) {} }
-    if (env.LH) { try { if (await env.LH.get(`WL_${ip}`)) return true; } catch(e) {} }
     return false;
 }
 async function parseJSONBody(r) {
@@ -980,43 +865,30 @@ async function parseJSONBody(r) {
 }
 async function addWhitelist(env, ip) {
     const time = Date.now();
-    let wroteDB = false, wroteKV = false, errors = [];
+    let wroteDB = false, errors = [];
     if (env.DB) {
         try {
             await env.DB.prepare("INSERT OR IGNORE INTO whitelist (ip, created_at) VALUES (?, ?)").bind(ip, time).run();
             wroteDB = true;
         } catch(e) { errors.push(`D1:${e.message || e}`); }
     }
-    if (env.LH) {
-        try {
-            await env.LH.put(`WL_${ip}`, "1");
-            wroteKV = true;
-        } catch(e) { errors.push(`KV:${e.message || e}`); }
-    }
-    return { ok: wroteDB || wroteKV, wroteDB, wroteKV, errors };
+    return { ok: wroteDB, errors };
 }
 async function delWhitelist(env, ip) {
-    let wroteDB = false, wroteKV = false, errors = [];
+    let wroteDB = false, errors = [];
     if (env.DB) {
         try {
             await env.DB.prepare("DELETE FROM whitelist WHERE ip = ?").bind(ip).run();
             wroteDB = true;
         } catch(e) { errors.push(`D1:${e.message || e}`); }
     }
-    if (env.LH) {
-        try {
-            await env.LH.delete(`WL_${ip}`);
-            wroteKV = true;
-        } catch(e) { errors.push(`KV:${e.message || e}`); }
-    }
-    return { ok: wroteDB || wroteKV, wroteDB, wroteKV, errors };
+    return { ok: wroteDB, errors };
 }
 async function getAllWhitelist(env) {
     let systemSet = new Set(), manualSet = new Set();
     if(typeof ADMIN_IP !== 'undefined' && ADMIN_IP) splitCSV(ADMIN_IP).forEach(i => systemSet.add(i));
     const envWL = await getSafeEnv(env, 'WL_IP', ""); if(envWL) splitCSV(envWL).forEach(i => systemSet.add(i));
     if (env.DB) { try { const { results } = await env.DB.prepare("SELECT ip FROM whitelist ORDER BY created_at DESC").all(); results.forEach(row => manualSet.add(row.ip)); } catch(e) {} }
-    if (env.LH) { try { const list = await listKvKeys(env, "WL_", 5000); list.forEach(k => manualSet.add(k.name.replace("WL_", ""))); } catch(e) {} }
     let result = []; systemSet.forEach(ip => result.push({ ip: ip, type: 'system' }));
     manualSet.forEach(ip => { if (!systemSet.has(ip)) result.push({ ip: ip, type: 'manual' }); });
     return result;
@@ -1032,16 +904,9 @@ async function logAccess(env, ip, region, action) {
             await env.DB.prepare("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 2000)").run();
         } catch (e) {}
     }
-    await appendKvLog(env, `${time}|${safeIP}|${safeRegion}|${safeAction}`);
 }
 async function logAccessThrottled(env, ip, region, action, ttlSeconds = 30) {
-    if (env.LH && ttlSeconds > 0) {
-        try {
-            const throttleKey = buildLogThrottleKey(ip, action);
-            if (await env.LH.get(throttleKey)) return;
-            await env.LH.put(throttleKey, "1", { expirationTtl: ttlSeconds });
-        } catch(e) {}
-    }
+    if (ttlSeconds > 0 && isThrottled(ip, action, ttlSeconds * 1000)) return;
     await logAccess(env, ip, region, action);
 }
 async function incrementDailyStats(env) {
@@ -1054,15 +919,6 @@ async function incrementDailyStats(env) {
             await env.DB.prepare("DELETE FROM stats WHERE date < ?").bind(cutoff).run();
             const { results } = await env.DB.prepare("SELECT count FROM stats WHERE date = ?").bind(dateStr).all();
             result = results[0]?.count?.toString() || "1";
-        } catch(e) {}
-    }
-    if (env.LH) {
-        try {
-            const key = buildStatsKey(dateStr);
-            const current = Number(await env.LH.get(key) || "0");
-            const next = (current + 1).toString();
-            await env.LH.put(key, next);
-            if (result === "0") result = next;
         } catch(e) {}
     }
     return result;
@@ -1143,7 +999,7 @@ export default {
       // ⭐ 功能4: DLS速度下限筛选
       const _DLS = await getSafeEnv(env, 'DLS', DLS);
 
-      // 🔐 ECH 环境变量覆盖 (优先级: 环境变量 > D1 > KV > 硬编码)
+      // 🔐 ECH 环境变量覆盖 (优先级: 环境变量 > D1 > 硬编码)
       const _echFlag = await getSafeEnv(env, 'ECH_ENABLED', ECH ? 'true' : 'false');
       ECH = _echFlag === 'true';
       ECH_SNI = await getSafeEnv(env, 'ECH_SNI', ECH_SNI);
@@ -1183,19 +1039,19 @@ export default {
       if (url.pathname === '/favicon.ico') return new Response(null, { status: 404 });
       
       const flag = url.searchParams.get('flag');
-      if (!flag && (env.DB || env.LH)) ctx.waitUntil(incrementDailyStats(env));
+      if (!flag && env.DB) ctx.waitUntil(incrementDailyStats(env));
       if (flag) {
           if (flag === 'github') { await sendTgMsg(ctx, env, "🌟 用户点击了烈火项目", r, "来源: 登录页面直达链接", isGlobalAdmin); return new Response(null, { status: 204 }); }
           if (flag === 'log_proxy_check') { ctx.waitUntil(logAccessThrottled(env, clientIP, `${city},${country}`, "检测ProxyIP", 30)); await sendTgMsg(ctx, env, "🔍 用户点击了 ProxyIP 检测", r, "来源: 后台管理面板", isGlobalAdmin); return new Response(null, { status: 204 }); }
           if (flag === 'log_sub_test') { ctx.waitUntil(logAccessThrottled(env, clientIP, `${city},${country}`, "订阅测试点击", 30)); await sendTgMsg(ctx, env, "🌟 用户点击了订阅测试", r, "来源: 后台管理面板", isGlobalAdmin); return new Response(null, { status: 204 }); }
-          if (flag === 'stats') { if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 }); const dateStr = new Date().toISOString().split('T')[0]; const reqCount = await getStoredDailyStats(env, dateStr); const cfStats = await getCloudflareUsage(env); const storageStatus = env.DB && env.LH ? 'D1/KV OK' : (env.DB ? 'D1 OK' : (env.LH ? 'KV OK' : 'Missing')); const reqLabel = storageStatus === 'Missing' ? 'Internal' : 'API'; const finalReq = storageStatus === 'Missing' ? '不统计' : (cfStats.success ? `${cfStats.total} (${reqLabel})` : `${reqCount} (${reqLabel})`); const cfConfigured = cfStats.success || (!!await getSafeEnv(env, 'CF_EMAIL', "") && !!await getSafeEnv(env, 'CF_KEY', "")); return new Response(JSON.stringify({ req: finalReq, ip: clientIP, loc: `${city}, ${country}`, storageStatus: storageStatus, cfConfigured: cfConfigured }), { headers: { 'Content-Type': 'application/json' } }); }
-          if (flag === 'get_logs') { if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 }); let d1Logs = [], kvLogs = []; if (env.DB) { try { const { results } = await env.DB.prepare("SELECT * FROM logs ORDER BY id DESC LIMIT 50").all(); d1Logs = (results || []).map(normalizeLogEntry).filter(Boolean); } catch(e) {} } if (env.LH) { try { kvLogs = await getKvLogObjects(env, 50); } catch(e) {} } const logs = mergeLogEntries(d1Logs, kvLogs, 50); if (logs.length > 0) { const type = d1Logs.length > 0 && kvLogs.length > 0 ? 'mixed' : (d1Logs.length > 0 ? 'd1' : 'kv'); return new Response(JSON.stringify({ type, logs: logs }), { headers: { 'Content-Type': 'application/json' } }); } return new Response(JSON.stringify({ logs: "No Storage" }), { headers: { 'Content-Type': 'application/json' } }); }
+          if (flag === 'stats') { if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 }); const dateStr = new Date().toISOString().split('T')[0]; const reqCount = await getStoredDailyStats(env, dateStr); const cfStats = await getCloudflareUsage(env); const storageStatus = env.DB ? 'D1 OK' : 'Missing'; const reqLabel = storageStatus === 'Missing' ? 'Internal' : 'API'; const finalReq = storageStatus === 'Missing' ? '不统计' : (cfStats.success ? `${cfStats.total} (${reqLabel})` : `${reqCount} (${reqLabel})`); const cfConfigured = cfStats.success || (!!await getSafeEnv(env, 'CF_EMAIL', "") && !!await getSafeEnv(env, 'CF_KEY', "")); return new Response(JSON.stringify({ req: finalReq, ip: clientIP, loc: `${city}, ${country}`, storageStatus: storageStatus, cfConfigured: cfConfigured }), { headers: { 'Content-Type': 'application/json' } }); }
+          if (flag === 'get_logs') { if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 }); let logs = []; if (env.DB) { try { const { results } = await env.DB.prepare("SELECT * FROM logs ORDER BY id DESC LIMIT 50").all(); logs = (results || []).map(normalizeLogEntry).filter(Boolean); } catch(e) {} } if (logs.length > 0) { return new Response(JSON.stringify({ type: 'd1', logs: logs }), { headers: { 'Content-Type': 'application/json' } }); } return new Response(JSON.stringify({ logs: "No Storage" }), { headers: { 'Content-Type': 'application/json' } }); }
           if (flag === 'get_whitelist') { if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 }); const list = await getAllWhitelist(env); return new Response(JSON.stringify({ list }), { headers: { 'Content-Type': 'application/json' } }); }
           if (flag === 'add_whitelist' && r.method === 'POST') { if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 }); const body = await parseJSONBody(r); if(!body?.ip) return new Response(JSON.stringify({status:'error',msg:'Missing IP'}), {headers:{'Content-Type':'application/json'}}); const ipStr = body.ip.trim(); if (!/^[\d.:a-fA-F]+$/.test(ipStr) || ipStr.length > 45) return new Response(JSON.stringify({status:'error',msg:'Invalid IP format'}), {headers:{'Content-Type':'application/json'}}); const result = await addWhitelist(env, ipStr); return new Response(JSON.stringify(result.ok ? {status:'ok', ...result} : {status:'error', msg: result.errors.join(' | ') || 'No writable storage', ...result}), {headers:{'Content-Type':'application/json'}}); }
           if (flag === 'del_whitelist' && r.method === 'POST') { if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 }); const body = await parseJSONBody(r); if(!body?.ip) return new Response(JSON.stringify({status:'error',msg:'Missing IP'}), {headers:{'Content-Type':'application/json'}}); const result = await delWhitelist(env, body.ip.trim()); return new Response(JSON.stringify(result.ok ? {status:'ok', ...result} : {status:'error', msg: result.errors.join(' | ') || 'No writable storage', ...result}), {headers:{'Content-Type':'application/json'}}); }
           if (flag === 'validate_tg' && r.method === 'POST') { if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 }); const body = await r.json(); await sendTgMsg(ctx, { TG_BOT_TOKEN: body.TG_BOT_TOKEN, TG_CHAT_ID: body.TG_CHAT_ID }, "🤖 TG 推送可用性验证", r, "配置有效", true); return new Response(JSON.stringify({success:true, msg:"验证消息已发送"}), {headers:{'Content-Type':'application/json'}}); }
           if (flag === 'validate_cf' && r.method === 'POST') { if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 }); const body = await r.json(); const res = await getCloudflareUsage(body); return new Response(JSON.stringify({success:res.success, msg: res.success ? `验证通过: 总请求 ${res.total}` : `验证失败: ${res.msg}`}), {headers:{'Content-Type':'application/json'}}); }
-          if (flag === 'save_config' && r.method === 'POST') { if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 }); try { const body = await r.json(); const ALLOWED_KEYS = new Set(['ADD','ADDAPI','ADDCSV','DLS','TG_BOT_TOKEN','TG_CHAT_ID','CF_ID','CF_TOKEN','CF_EMAIL','CF_KEY','PROXYIP','SUB_DOMAIN','SUBAPI','PS','LOGIN_PAGE_TITLE','DASHBOARD_TITLE','TG_GROUP_URL','SITE_URL','GITHUB_URL','PROXY_CHECK_URL','CLASH_CONFIG','SINGBOX_CONFIG_V11','SINGBOX_CONFIG_V12','WL_IP','ECH_ENABLED','ECH_SNI','ECH_DNS']); for (const [k, v] of Object.entries(body)) { if (!ALLOWED_KEYS.has(k)) continue; if (env.DB) await env.DB.prepare("INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?").bind(k, v, v).run(); if (env.LH) await env.LH.put(k, v); } return new Response(JSON.stringify({status: 'ok'}), { headers: { 'Content-Type': 'application/json' } }); } catch(e) { return new Response(JSON.stringify({status: 'error', msg: e.toString()}), { headers: { 'Content-Type': 'application/json' } }); } }
+          if (flag === 'save_config' && r.method === 'POST') { if (!hasAuthCookie && !isGlobalAdmin) return new Response('403 Forbidden', { status: 403 }); try { const body = await r.json(); const ALLOWED_KEYS = new Set(['ADD','ADDAPI','ADDCSV','DLS','TG_BOT_TOKEN','TG_CHAT_ID','CF_ID','CF_TOKEN','CF_EMAIL','CF_KEY','PROXYIP','SUB_DOMAIN','SUBAPI','PS','LOGIN_PAGE_TITLE','DASHBOARD_TITLE','TG_GROUP_URL','SITE_URL','GITHUB_URL','PROXY_CHECK_URL','CLASH_CONFIG','SINGBOX_CONFIG_V11','SINGBOX_CONFIG_V12','WL_IP','ECH_ENABLED','ECH_SNI','ECH_DNS']); for (const [k, v] of Object.entries(body)) { if (!ALLOWED_KEYS.has(k)) continue; if (env.DB) await env.DB.prepare("INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?").bind(k, v, v).run(); } return new Response(JSON.stringify({status: 'ok'}), { headers: { 'Content-Type': 'application/json' } }); } catch(e) { return new Response(JSON.stringify({status: 'error', msg: e.toString()}), { headers: { 'Content-Type': 'application/json' } }); } }
       }
 
       if (_SUB_PW && url.pathname === `/${_SUB_PW}`) {
@@ -3704,7 +3560,7 @@ function dashPage(host, uuid, proxyip, subpass, subdomain, converter, env, clien
                 }
                 logBox.innerHTML = html || '暂无日志';
                 logBox.scrollTop = 0;
-            } catch(e) { document.getElementById('logBox').innerText = '加载失败或未绑定 DB/KV'; }
+            } catch(e) { document.getElementById('logBox').innerText = '加载失败或未绑定 DB'; }
         }
 
         // 加载白名单

@@ -110,14 +110,59 @@ GrainTCPV1 是一个部署在 Cloudflare 上的代理节点管理系统，提供
 8. 添加环境变量（最少填：`UUID`、`WEB_PASSWORD`、`SUB_PASSWORD`）
 9. 可选：绑定自定义域名（设置 → 触发器 → 自定义域）
 
-**如需 D1 数据库（推荐）**：
+**D1 数据库配置（必须，完整步骤）**：
 
-10. 左侧菜单进入 **D1** → 点击 **创建数据库** → 随意命名 → 创建
-11. 回到 Worker **设置 → 变量和机密 → D1 数据库绑定**
-12. 变量名填 `DB`（必须是 DB，不可更改）→ 选择刚创建的数据库
-13. 保存后重新部署
+D1 是 Cloudflare 提供的免费 SQLite 数据库，用于存储配置、白名单、日志和统计数据。Worker 版必须绑定 D1 才能使用后台管理功能。
 
-> 无需手动建表，代码首次运行会自动创建所有表。
+**第一步：创建 D1 数据库**
+
+1. 登录 Cloudflare Dashboard
+2. 左侧菜单找到 **Workers & Pages** → 点击 **D1 SQL 数据库**
+3. 点击右上角 **创建** 按钮
+4. 数据库名称随意填写（如 `graintcp_db`）→ 点击 **创建**
+
+**第二步：初始化表结构**
+
+进入刚创建的数据库 → 点击 **控制台** 标签 → 粘贴以下 SQL 并点击 **执行**：
+
+```sql
+CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS whitelist (ip TEXT PRIMARY KEY, created_at INTEGER);
+CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT, ip TEXT, region TEXT, action TEXT);
+CREATE TABLE IF NOT EXISTS stats (date TEXT PRIMARY KEY, count INTEGER DEFAULT 0);
+```
+
+执行成功后会看到 4 张表被创建。
+
+**第三步：绑定到 Worker**
+
+1. 回到你的 Worker 项目 → **设置** → **变量和机密**
+2. 向下滚动找到 **D1 数据库绑定** 区域
+3. 点击 **添加绑定**
+4. **变量名称**填：`DB`（必须大写，不可改名）
+5. **D1 数据库**下拉选择刚创建的数据库
+6. 点击 **保存** → 重新部署 Worker
+
+**验证是否成功**：
+
+部署后访问你的 Worker 域名，登录后台 → 如果白名单、日志、统计等功能正常显示，说明 D1 绑定成功。
+
+**D1 数据表说明**：
+
+| 表名 | 用途 | 说明 |
+|------|------|------|
+| `config` | 配置存储 | 后台保存的所有配置（ProxyIP、TG Token 等） |
+| `whitelist` | IP 白名单 | 免登录 IP 地址列表 |
+| `logs` | 访问日志 | 最近 2000 条操作记录（自动清理） |
+| `stats` | 每日统计 | 按日期累计访问次数 |
+
+**D1 免费额度**：
+
+- 每日读取：5,000,000 行
+- 每日写入：100,000 行
+- 存储空间：5 GB
+
+正常使用远低于这些限制，无需担心。
 
 ### 方式二：Cloudflare Snippets 部署
 
@@ -184,7 +229,7 @@ GrainTCPV1 是一个部署在 Cloudflare 上的代理节点管理系统，提供
 
 Workers 版通过 Cloudflare Dashboard 在线配置环境变量。
 
-**配置优先级：环境变量 > D1 数据库 > KV 空间 > 代码硬编码**
+**配置优先级：环境变量 > D1 数据库 > 代码硬编码**
 
 #### 必填配置
 
@@ -714,7 +759,7 @@ ECH 开启后，系统自动对订阅内容做以下处理：
 |--|---------|----------|
 | 大小限制 | 1MB（免费版） | 32KB |
 | 环境变量 | 支持 | 不支持 |
-| D1/KV 存储 | 支持 | 不支持 |
+| D1 数据库 | 支持 | 不支持 |
 | TG 通知 | 支持 | 不支持 |
 | 白名单/日志 | 支持 | 不支持 |
 | 需要自定义域名 | 是（或用 workers.dev） | 否（用已有域名） |
