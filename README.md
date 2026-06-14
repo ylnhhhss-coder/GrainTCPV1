@@ -6,7 +6,7 @@
 
 ## 视频教程
 
-[stallTCP视频教程](https://www.youtube.com/watch?v=jJMZOrQOwM8)
+[RrainTCP视频教程](https://www.youtube.com/watch?v=jJMZOrQOwM8)
 
 ## 🛠 开源代码引用
 
