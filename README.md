@@ -4,17 +4,13 @@
 
 ---
 
+## 视频教程
+
+[RrainTCP视频教程](https://www.youtube.com/watch?v=jJMZOrQOwM8)
+
 ## 🛠 开源代码引用
 
 本项目代码由 Claude Opus AI 辅助生成
-
-**天诚修复与新增功能：**
-*   ❇️ 修复了 Cloudflare 网站不能访问的问题。
-*   ❇️ 新增加了机场三字码的适配。
-*   ❇️ 新增优选IP支持。
-*   ❇️ 新增解锁 Emby 播放器。
-*   ❇️ 新增了韩国节点适配。
-*   ❇️ Vless 订阅器内置 CSV 文件优化识别功能。
 
 **引用的开源项目与服务：**
 *   **源代码作者**：[Alexandre_Kojeve](https://t.me/Alexandre_Kojeve) (致敬原版 stallTCP1.32)
@@ -45,6 +41,7 @@
 
 ## 目录
 
+- [视频教程](##-视频教程)
 - [开源代码引用](#-开源代码引用)
 - [项目简介](#项目简介)
 - [功能一览](#功能一览)
@@ -116,7 +113,7 @@ GrainTCPV1 是一个部署在 Cloudflare 上的代理节点管理系统，提供
 
 **Snippets 版：**
 
-<img width="1920" alt="Snippets登录页" src="./issue/snippets展示/snippets登录页.png" />
+<img width="1920" height="919" alt="image" src="https://github.com/user-attachments/assets/288f586d-8f37-4785-a4dc-58153bb5dfa2" />
 <img width="1920" alt="Snippets管理页面" src="./issue/snippets展示/snippets管理页面.png" />
 
 **Worker 版：**

@@ -17,7 +17,7 @@ const LOGIN_PAGE_TITLE = "Worker Login"; // 修改你的登录页标题
 const DASHBOARD_TITLE = "烈火控制台 · Glass LH"; //修改你的管理后台标题
 const TG_GROUP_URL = "https://t.me/zyssadmin";       // 登录页“交流群”链接
 const SITE_URL = "https://blog.2026565.xyz/";        // 登录页“天诚网站”链接
-const GITHUB_URL = "https://github.com/xtgm/stallTCP1.32V2"; // 登录页“项目直达”链接
+const GITHUB_URL = "https://github.com/xtgm/GrainTCPV1"; // 登录页“项目直达”链接
 const PROXY_CHECK_URL = "https://kaic.hidns.co/";    // 后台 ProxyIP 检测跳转地址
 
 // --- 订阅转换配置文件 (支持环境变量覆盖) ---
@@ -3572,6 +3572,9 @@ function dashPage(host, uuid, proxyip, subpass, subdomain, converter, env, clien
                     <div class="card-title"><span class="icon">🛠️</span> 优选IP与远程配置</div>
                     <div style="font-size:0.8rem;color:var(--danger);margin-bottom:15px;padding:10px;background:rgba(255,0,64,0.1);border-left:3px solid var(--danger)">
                         ⚠️ 注意：若要在此生效，请确保 Cloudflare 后台未设置对应环境变量 (ADD/ADDAPI/ADDCSV)
+                    </div>
+                    <div style="font-size:0.8rem;color:var(--danger);margin-bottom:15px;padding:10px;background:rgba(255,0,64,0.1);border-left:3px solid var(--danger)">
+                        ⚠️ 注意：若要在此生效，请确保 Cloudflare 后台或者硬编码未设置SUB订阅器 (详情顶部配置DEFAULT_SUB_DOMAIN)
                     </div>
                     <div class="input-block">
                         <label>ADD - 本地优选 IP (格式: IP:Port#Name，一行一个)</label>
