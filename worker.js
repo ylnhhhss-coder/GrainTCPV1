@@ -3591,7 +3591,7 @@ function dashPage(host, uuid, proxyip, subpass, subdomain, converter, env, clien
                     <!-- ⭐ 功能4: DLS 设置输入框 -->
                     <div class="input-block">
                         <label>DLS (ADDCSV专用) - 速度下限筛选 (单位: MB/s)</label>
-                        <input type="text" id="inpDls" placeholder="5000" value="${safeVal(dls)}">
+                        <input type="text" id="inpDls" placeholder="7" value="${safeVal(dls)}">
                     </div>
                     <button class="btn btn-success" style="width:100%" onclick="saveNodeConfig()">💾 保存配置</button>
                 </div>
